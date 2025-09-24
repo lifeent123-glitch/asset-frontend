@@ -1,3 +1,4 @@
+import Header from "/src/components/Header";
 import { Routes, Route } from 'react-router-dom'
 import Dashboard from './pages/Dashboard'
 import Assets from './pages/Assets'
