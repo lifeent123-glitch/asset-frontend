@@ -1,38 +1,55 @@
-import React from "react";
-import { Link, useLocation } from "react-router-dom";
+import { NavLink } from "react-router-dom";
 
 const tabs = [
-  { to: "/",            label: "ダッシュボード" },
-  { to: "/assets",      label: "資産管理" },
-  { to: "/files",       label: "ファイル管理" },
-  { to: "/manual-entry",label: "手入力" },
-  { to: "/reports",     label: "レポート出力" },
-  { to: "/admin",       label: "管理者設定" },
+  { to: "/", label: "ダッシュボード" },
+  { to: "/assets", label: "資産管理" },
+  { to: "/files", label: "ファイル管理" },
+  { to: "/manual-entry", label: "手入力" },
+  { to: "/reports", label: "レポート出力" },
+  { to: "/admin", label: "管理者設定" },
 ];
 
 export default function Header() {
-  const { pathname } = useLocation();
-
   return (
-    <header className="bg-gray-100 border-b">
-      <div className="container mx-auto h-14 px-4 flex items-center justify-between">
-        <h1 className="text-sm font-bold text-gray-900">資産管理システム</h1>
-        <nav className="flex items-center gap-2 text-sm">
-          {tabs.map(({ to, label }) => {
-            const active = to === "/" ? pathname === "/" : pathname.startsWith(to);
-            return (
-              <Link
-                key={to}
-                to={to}
-                className={[
-                  "px-3 py-2 rounded transition-colors",
-                  active ? "bg-blue-600 text-white" : "hover:bg-gray-200"
-                ].join(" ")}
-              >
-                {label}
-              </Link>
-            );
-          })}
+    <header className="bg-gray-100" style={{ borderBottom: "1px solid #ccc" }}>
+      <div className="flex items-center justify-between" style={{ height: "50px" }}>
+        {/* 左：ロゴ */}
+        <div style={{ paddingLeft: "20px" }}>
+          <h1 className="text-gray-900" style={{ fontSize: "16px", fontWeight: "bold" }}>
+            資産管理システム
+          </h1>
+        </div>
+
+        {/* 右：タブナビ（Assetsと同配置/配色） */}
+        <nav className="flex items-center" style={{ paddingRight: "20px" }}>
+          {tabs.map((t) => (
+            <NavLink
+              key={t.to}
+              to={t.to}
+              end={t.to === "/"}
+              className={({ isActive }) =>
+                [
+                  "hover:bg-gray-200",
+                  "inline-block",
+                  "relative",
+                  "no-underline",
+                  "text-[14px]",
+                  "px-[18px]",
+                  "py-[15px]",
+                  isActive
+                    ? "text-white font-semibold rounded-t-[4px]"
+                    : "text-[#333] font-normal",
+                ].join(" ")
+              }
+              style={({ isActive }) =>
+                isActive
+                  ? { backgroundColor: "#4a90e2" } // Assetsと同じ青
+                  : undefined
+              }
+            >
+              {t.label}
+            </NavLink>
+          ))}
         </nav>
       </div>
     </header>

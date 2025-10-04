@@ -7,7 +7,7 @@ import {
 
 const ManualInputPage = () => {
   // 選択状態
-  const [selectedMonth, setSelectedMonth] = useState('2025-06');
+  const [selectedMonth, setSelectedMonth] = useState('2025-07');
   const [selectedCurrency, setSelectedCurrency] = useState('ALL');
   const [excludeFundTransfer, setExcludeFundTransfer] = useState(true);
   
@@ -29,93 +29,46 @@ const ManualInputPage = () => {
   // 通貨リスト
   const currencies = ['USDT', '円', 'AED', 'USD', 'IDR', 'NT$', 'ETH', 'WBTC'];
   
-  // ダミーデータ（実際のExcelデータ構造に準拠）
-  const [transactions, setTransactions] = useState([
-    {
-      id: 1,
-      date: '2025-06-01',
-      account: 'ADCB口座',
-      type: 'IN',
-      category: 'サイト収益',
-      content: '月次収益',
-      amount: 50000,
-      currency: 'USDT',
-      rate: 147.5,
-      jpyAmount: 7375000,
-      remarks: '',
-      status: 'confirmed'
-    },
-    {
-      id: 2,
-      date: '2025-06-05',
-      account: 'Ledger ウォレット',
-      type: 'OUT',
-      category: '投資支出',
-      content: 'DeFi投資',
-      amount: 10000,
-      currency: 'USDT',
-      rate: 147.5,
-      jpyAmount: 1475000,
-      remarks: 'Uniswap LP',
-      status: 'confirmed'
-    },
-    {
-      id: 3,
-      date: '2025-06-10',
-      account: '三菱UFJ銀行',
-      type: 'OUT',
-      category: '法人支出',
-      content: '事務所家賃',
-      amount: 850000,
-      currency: '円',
-      rate: 1,
-      jpyAmount: 850000,
-      remarks: '6月分',
-      status: 'confirmed'
-    },
-    {
-      id: 4,
-      date: '2025-06-15',
-      account: 'Ledger ウォレット',
-      type: 'IN',
-      category: '資金移動',
-      content: 'メタマスクから移動',
-      amount: 15000,
-      currency: 'USDT',
-      rate: 147.5,
-      jpyAmount: 2212500,
-      remarks: '資金集約',
-      status: 'confirmed'
-    },
-    {
-      id: 5,
-      date: '2025-06-15',
-      account: 'メタマスク ETHチェーン',
-      type: 'OUT',
-      category: '資金移動',
-      content: 'Ledgerへ移動',
-      amount: 15000,
-      currency: 'USDT',
-      rate: 147.5,
-      jpyAmount: 2212500,
-      remarks: '資金集約',
-      status: 'confirmed'
-    },
-    {
-      id: 6,
-      date: '2025-06-20',
-      account: '事業用口座',
-      type: 'キャッシュフロー',
-      category: 'IN',
-      content: 'キャッシュイン',
-      amount: 1000000,
-      currency: '円',
-      rate: 1,
-      jpyAmount: 1000000,
-      remarks: '営業CF',
-      status: 'confirmed'
+  const [transactions, setTransactions] = useState([]);
+
+// 初期ロード＆月や通貨変更時に再取得
+useEffect(() => {
+  console.log('[manual-entry] useEffect fired with month:', selectedMonth, 'currency:', selectedCurrency); // ★追加
+
+  const fetchTransactions = async () => {
+    try {
+      const url = `/api/manual-entry?month=${selectedMonth}&segment=total&currency=${selectedCurrency}&exclude_transfer=true`;
+      console.log('[manual-entry] fetching:', url);  // ★追加
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      console.log('[manual-entry] rows:', Array.isArray(data.rows) ? data.rows.length : 'no rows'); // ★追加
+
+      const rows = (data.rows || []).map((r: any) => ({
+        id: Number(r.id),
+        date: String(r.date).slice(0, 10),        // 'YYYY-MM-DD'
+        account: r.account ?? '',
+        type: r.type ?? 'IN',
+        category: r.category_name ?? '',
+        category_id: r.category_id ?? null,
+        content: r.memo ?? '',
+        amount: Number(r.amount ?? 0),
+        currency: r.currency ?? 'JPY',
+        rate: r.rate == null ? null : Number(r.rate),
+        jpyAmount: Number(r.jpy_amount ?? 0),
+        remarks: r.memo ?? '',
+        segment: r.segment ?? 'total',
+        status: 'confirmed',
+      }));
+
+      setTransactions(rows);
+    } catch (err) {
+      console.error('manual-entry fetch error', err);
     }
-  ]);
+  };
+
+  fetchTransactions();
+}, [selectedMonth, selectedCurrency]);
   
   // 新規行の追加用テンプレート
   const [newTransaction, setNewTransaction] = useState({
@@ -320,6 +273,51 @@ const ManualInputPage = () => {
       setTransactions(transactions.filter(t => t.id !== id));
     }
   };
+
+  const uploadCsv = async (file: File) => {
+    try {
+      // 1) /api/csv-import へアップロード
+      const fd = new FormData();
+      fd.append('file', file);
+      const up = await fetch('/api/csv-import', { method: 'POST', body: fd });
+      if (!up.ok) throw new Error(await up.text());
+
+      // 2) /api/csv-import/commit で確定
+      const cm = await fetch('/api/csv-import/commit', { method: 'POST' });
+      if (!cm.ok) throw new Error(await cm.text());
+
+      // 3) 一覧を再取得（既存マッピングに合わせて成形）
+      const q = `/api/manual-entry?month=${selectedMonth}&segment=total&currency=${selectedCurrency}&exclude_transfer=${excludeFundTransfer}`;
+      const res = await fetch(q);
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+
+      const rows = (data.rows || []).map((r: any) => ({
+        id: Number(r.id),
+        date: String(r.date).slice(0, 10),
+        account: r.account ?? '',
+        type: r.type ?? 'IN',
+        category: r.category_name ?? '',
+        category_id: r.category_id ?? null,
+        content: r.memo ?? '',
+        amount: Number(r.amount ?? 0),
+        currency: r.currency ?? 'JPY',
+        rate: r.rate == null ? null : Number(r.rate),
+        jpyAmount: Number(r.jpy_amount ?? 0),
+        remarks: r.memo ?? '',
+        segment: r.segment ?? 'total',
+        status: 'confirmed',
+      }));
+
+      setTransactions(rows);
+      alert('CSV取り込みが完了しました。');
+    } catch (e) {
+      console.error('csv upload error', e);
+      alert('CSV取り込みでエラーが発生しました。コンソールを確認してください。');
+    } finally {
+      if (fileInputRef.current) (fileInputRef as any).current.value = '';
+    }
+  };
   
   // 過去データのコピー
   const handleCopyTransaction = (transaction) => {
@@ -494,6 +492,8 @@ const ManualInputPage = () => {
                   onChange={(e) => setSelectedMonth(e.target.value)}
                   className="px-3 py-2 border border-gray-300 rounded-md text-sm focus:ring-blue-500 focus:border-blue-500"
                 >
+                  {/* ▼ ここを 7月を先頭にして追加 */}
+                  <option value="2025-07">2025年7月</option>
                   <option value="2025-06">2025年6月</option>
                   <option value="2025-05">2025年5月</option>
                   <option value="2025-04">2025年4月</option>
@@ -543,12 +543,15 @@ const ManualInputPage = () => {
               </button>
               
               <input
-                ref={fileInputRef}
-                type="file"
-                accept=".csv"
-                className="hidden"
-                onChange={(e) => console.log('File upload:', e.target.files)}
-              />
+  ref={fileInputRef}
+  type="file"
+  accept=".csv"
+  className="hidden"
+  onChange={(e) => {
+    const f = e.target.files?.[0];
+    if (f) uploadCsv(f);
+  }}
+/>
             </div>
           </div>
         </div>
