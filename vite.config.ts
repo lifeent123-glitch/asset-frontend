@@ -1,15 +1,23 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
   server: {
-    // 外部からの接続を受ける
-    host: '0.0.0.0',
+    port: 5173,
+    strictPort: false,
     proxy: {
-      '/api': 'http://localhost:3001'
+      // ここをバックエンドの実ポートに合わせてください（例: 3001）
+      '/api': {
+        target: 'http://127.0.0.1:3001',
+        changeOrigin: true,
+        secure: false,
+        // /api をそのまま渡す。もしバックエンドのパスが /api でない場合は rewrite を調整
+        // rewrite: (path) => path.replace(/^\/api/, ''),
+      },
     },
-    // すべてのホストを許可（CloudflareのランダムURLも許可）
-    allowedHosts: true
-  }
-})
+  },
+  preview: {
+    port: 4173,
+  },
+});

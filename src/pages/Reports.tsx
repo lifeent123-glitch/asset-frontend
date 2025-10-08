@@ -1,723 +1,357 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Download,
-  FileText,
-  Calendar,
-  DollarSign,
-  TrendingUp,
-  TrendingDown,
-  AlertCircle,
-  Check,
-  BarChart3,
-  ChevronDown,
-  ChevronUp,
+  Calendar, Download, FileText, Search, ArrowUpRight, ArrowDownRight, Eye, EyeOff, AlertCircle
 } from 'lucide-react';
+import Header from "../components/Header";
 
 /* =========================
-   型定義（TS エラー解消の肝）
-   ========================= */
-type Flow = 'IN' | 'OUT'; // キャッシュフローの表示で使用
-type Money = number;
+ * 型定義
+ * ========================= */
+type Flow = 'IN' | 'OUT' | 'キャッシュフロー';
+type Segment = 'corporate' | 'personal' | 'total';
+type Currency = 'JPY' | 'USD' | 'AED' | 'NTD' | 'USDT' | 'USDC';
 
-type Tx = {
-  date: string;
+interface ReportRow {
+  id: string;
+  date: string;            // YYYY-MM-DD
+  segment: Segment;        // 'corporate' | 'personal' | 'total'
+  account: string;
   category: string;
-  detail: string;
-  currency?: string;
-  originalAmount?: number;
-  amountJPY: number;
-  amountUSD: number;
-  note?: string;
-};
+  type: Flow;
+  description?: string;
+  currency: Currency;
+  amount: number;          // 元通貨の金額
+  jpyAmount: number;       // 円換算
+  usdAmount?: number;      // ドル換算（任意）
+}
 
-type CategoryBucket = {
-  amountJPY: Money;
-  amountUSD: Money;
-  details: Tx[];
-};
+interface ApiListResponse<T> {
+  status: 'ok' | 'error';
+  data: T;
+  message?: string;
+}
 
-type CategoryTotals = Record<string, CategoryBucket>; // 文字列キー（カテゴリ/IN/OUTなど）で引ける
+interface ReportPayload {
+  rows: ReportRow[];
+}
 
 /* =========================
-   サマリ行コンポーネント
-   ========================= */
-type CategorySummaryItemProps = {
-  category: string;
-  amountJPY: number;
-  amountUSD: number;
-  details: Tx[];
-  type: 'income' | 'expense' | 'cashflow';
-  isExportMode?: boolean;
+ * ユーティリティ
+ * ========================= */
+const toCSV = (headers: string[], rows: (string | number)[][]) => {
+  const esc = (v: string | number) =>
+    typeof v === 'string' && (v.includes(',') || v.includes('"') || v.includes('\n'))
+      ? `"${v.replace(/"/g, '""')}"`
+      : v;
+  const body = [headers.join(','), ...rows.map(r => r.map(esc).join(','))].join('\n');
+  return new Blob([body], { type: 'text/csv;charset=utf-8' });
 };
 
-const CategorySummaryItem: React.FC<CategorySummaryItemProps> = ({
-  category,
-  amountJPY,
-  amountUSD,
-  details,
-  type,
-  isExportMode = false,
-}) => {
-  const [isExpanded, setIsExpanded] = useState(isExportMode);
+const saveBlob = (blob: Blob, filename: string) => {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+};
 
-  // エクスポートモードが変更されたときに展開状態を更新
+const fmt = (n: number, locale: 'ja-JP' | 'en-US' = 'ja-JP', frac = 0) =>
+  n.toLocaleString(locale, { minimumFractionDigits: frac, maximumFractionDigits: frac });
+
+/* =========================
+ * メイン
+ * ========================= */
+const Reports: React.FC = () => {
+  const [rows, setRows] = useState<ReportRow[]>([]);
+  const [month, setMonth] = useState<string>(new Date().toISOString().slice(0, 7)); // YYYY-MM
+  const [segment, setSegment] = useState<Segment>('total');
+  const [query, setQuery] = useState<string>('');
+  const [showAmounts, setShowAmounts] = useState<boolean>(true);
+  const [currencyView, setCurrencyView] = useState<'jpy' | 'usd' | 'both'>('both');
+
+  // 取得（APIがなければ空で安全動作）
   useEffect(() => {
-    if (isExportMode) {
-      setIsExpanded(true);
-    }
-  }, [isExportMode]);
+    const ac = new AbortController();
+    (async () => {
+      try {
+        // 想定API：/api/reports?month=YYYY-MM&segment=total|corporate|personal
+        const qs = new URLSearchParams({ month, segment });
+        const res = await fetch(`/api/reports?${qs.toString()}`, { signal: ac.signal });
+        if (!res.ok) { setRows([]); return; }
+        const json = (await res.json()) as ApiListResponse<ReportPayload>;
+        const list = Array.isArray(json?.data?.rows) ? json.data.rows : [];
+        setRows(list);
+      } catch {
+        setRows([]); // 取得失敗時も空で表示
+      }
+    })();
+    return () => ac.abort();
+  }, [month, segment]);
 
-  const isIncome = type === 'income';
-  const isCashflow = type === 'cashflow';
+  // フィルタリング
+  const filtered = useMemo(() => {
+    const key = query.trim().toLowerCase();
+    return rows
+      .filter(r => (segment === 'total' ? true : r.segment === segment))
+      .filter(r =>
+        key === '' ||
+        r.account.toLowerCase().includes(key) ||
+        r.category.toLowerCase().includes(key) ||
+        (r.description ?? '').toLowerCase().includes(key)
+      )
+      .sort((a, b) => a.date.localeCompare(b.date));
+  }, [rows, query, segment]);
 
-  let bgColor: string;
-  let textColor: string;
-  let borderColor: string;
+  // 集計
+  const totals = useMemo(() => {
+    const inJPY  = filtered.filter(r => r.type === 'IN').reduce((s, r) => s + r.jpyAmount, 0);
+    const outJPY = filtered.filter(r => r.type === 'OUT').reduce((s, r) => s + r.jpyAmount, 0);
+    const cfJPY  = filtered.filter(r => r.type === 'キャッシュフロー').reduce((s, r) => s + r.jpyAmount, 0);
+    const netJPY = inJPY - outJPY;
 
-  if (isCashflow) {
-    bgColor = 'bg-blue-50 hover:bg-blue-100';
-    textColor = 'text-blue-700';
-    borderColor = 'border-blue-200';
-  } else if (isIncome) {
-    bgColor = 'bg-green-50 hover:bg-green-100';
-    textColor = 'text-green-700';
-    borderColor = 'border-green-200';
-  } else {
-    bgColor = 'bg-red-50 hover:bg-red-100';
-    textColor = 'text-red-700';
-    borderColor = 'border-red-200';
-  }
+    const inUSD  = filtered.filter(r => r.type === 'IN').reduce((s, r) => s + (r.usdAmount ?? 0), 0);
+    const outUSD = filtered.filter(r => r.type === 'OUT').reduce((s, r) => s + (r.usdAmount ?? 0), 0);
+    const cfUSD  = filtered.filter(r => r.type === 'キャッシュフロー').reduce((s, r) => s + (r.usdAmount ?? 0), 0);
+    const netUSD = inUSD - outUSD;
+
+    return { inJPY, outJPY, cfJPY, netJPY, inUSD, outUSD, cfUSD, netUSD };
+  }, [filtered]);
+
+  // エクスポート（CSV / Excel相当）
+  const onExport = (kind: 'CSV' | 'Excel') => {
+    const headers = [
+      'date','segment','account','category','type','currency','amount','jpyAmount','usdAmount','description'
+    ];
+    const data = filtered.map(r => ([
+      r.date, r.segment, r.account, r.category, r.type, r.currency,
+      r.amount, r.jpyAmount, r.usdAmount ?? '', r.description ?? ''
+    ]));
+    const blob = toCSV(headers, data);
+    const name = `report_${month}_${segment}.${kind === 'CSV' ? 'csv' : 'xlsx'}`;
+    // Excel相当はCSVで出力（拡張子だけ.xlsxにしてもExcelで開けます）
+    saveBlob(blob, name);
+  };
 
   return (
-    <div className={`border ${borderColor} rounded-lg mb-3 overflow-hidden transition-all`}>
-      <div
-        className={`${bgColor} p-4 ${!isExportMode ? 'cursor-pointer' : ''} transition-colors`}
-        onClick={() => !isExportMode && setIsExpanded(!isExpanded)}
-      >
-        <div className="flex justify-between items-center">
-          <span className={`font-medium ${textColor}`}>{category}</span>
-          <div className="flex items-center space-x-4">
-            <div className="text-right">
-              <span className={`font-semibold ${textColor}`}>¥{amountJPY.toLocaleString()}</span>
-              <span className={`text-sm ${textColor} ml-2`}>${amountUSD.toLocaleString()}</span>
-            </div>
-            {!isExportMode && (isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />)}
+    <div className="min-h-screen bg-gray-50">
+    {/* 共通ヘッダー */}
+    <Header />
+
+      {/* 条件バー */}
+      <div className="bg-white border-b px-6 py-4 sticky top-[48px] z-30">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2">
+            <Calendar size={18} className="text-gray-500" />
+            <input
+              type="month"
+              value={month}
+              onChange={(e) => setMonth(e.target.value)}
+              className="px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 text-sm"
+            />
+          </div>
+
+          <select
+            value={segment}
+            onChange={(e) => setSegment(e.target.value as Segment)}
+            className="px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 text-sm"
+          >
+            <option value="total">総合</option>
+            <option value="corporate">法人</option>
+            <option value="personal">個人</option>
+          </select>
+
+          <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+            <button
+              onClick={() => setCurrencyView('jpy')}
+              className={`px-3 py-1 rounded text-sm ${currencyView === 'jpy' ? 'bg-white shadow-sm' : ''}`}
+            >
+              円
+            </button>
+            <button
+              onClick={() => setCurrencyView('usd')}
+              className={`px-3 py-1 rounded text-sm ${currencyView === 'usd' ? 'bg-white shadow-sm' : ''}`}
+            >
+              $
+            </button>
+            <button
+              onClick={() => setCurrencyView('both')}
+              className={`px-3 py-1 rounded text-sm ${currencyView === 'both' ? 'bg-white shadow-sm' : ''}`}
+            >
+              両方
+            </button>
+          </div>
+
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+            <input
+              type="text"
+              placeholder="アカウント・カテゴリ・メモで検索…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              className="w-72 pl-10 pr-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 text-sm"
+            />
+          </div>
+
+          <button
+            onClick={() => setShowAmounts(!showAmounts)}
+            className="p-2 text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
+            title={showAmounts ? '金額を隠す' : '金額を表示'}
+          >
+            {showAmounts ? <Eye size={18} /> : <EyeOff size={18} />}
+          </button>
+
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={() => onExport('CSV')}
+              className="flex items-center gap-1 px-3 py-2 bg-green-600 text-white rounded text-sm hover:bg-green-700"
+            >
+              <FileText size={14} />
+              CSV
+            </button>
+            <button
+              onClick={() => onExport('Excel')}
+              className="flex items-center gap-1 px-3 py-2 bg-green-600 text-white rounded text-sm hover:bg-green-700"
+            >
+              <Download size={14} />
+              Excel
+            </button>
           </div>
         </div>
       </div>
 
-      {isExpanded && details && details.length > 0 && (
-        <div className="bg-white border-t">
-          <table className="min-w-full">
+      {/* サマリーカード */}
+      <div className="px-6 py-5">
+        <div className="grid grid-cols-4 gap-3">
+          <div className="bg-white border rounded-lg p-4">
+            <div className="text-xs text-gray-500">収入（JPY）</div>
+            <div className="text-xl font-bold">{showAmounts ? `¥${fmt(totals.inJPY)}` : '***,***'}</div>
+          </div>
+          <div className="bg-white border rounded-lg p-4">
+            <div className="text-xs text-gray-500">支出（JPY）</div>
+            <div className="text-xl font-bold">{showAmounts ? `¥${fmt(totals.outJPY)}` : '***,***'}</div>
+          </div>
+          <div className="bg-white border rounded-lg p-4">
+            <div className="text-xs text-gray-500">キャッシュフロー（JPY）</div>
+            <div className="text-xl font-bold">{showAmounts ? `¥${fmt(totals.cfJPY)}` : '***,***'}</div>
+          </div>
+          <div className="bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-lg p-4">
+            <div className="text-xs opacity-90">純額（JPY）</div>
+            <div className="text-xl font-bold">{showAmounts ? `¥${fmt(totals.netJPY)}` : '***,***'}</div>
+          </div>
+
+          {(currencyView === 'usd' || currencyView === 'both') && (
+            <>
+              <div className="bg-white border rounded-lg p-4">
+                <div className="text-xs text-gray-500">収入（USD）</div>
+                <div className="text-xl font-bold">{showAmounts ? `$${fmt(totals.inUSD, 'en-US', 2)}` : '***,***'}</div>
+              </div>
+              <div className="bg-white border rounded-lg p-4">
+                <div className="text-xs text-gray-500">支出（USD）</div>
+                <div className="text-xl font-bold">{showAmounts ? `$${fmt(totals.outUSD, 'en-US', 2)}` : '***,***'}</div>
+              </div>
+              <div className="bg-white border rounded-lg p-4">
+                <div className="text-xs text-gray-500">キャッシュフロー（USD）</div>
+                <div className="text-xl font-bold">{showAmounts ? `$${fmt(totals.cfUSD, 'en-US', 2)}` : '***,***'}</div>
+              </div>
+              <div className="bg-gradient-to-r from-emerald-600 to-emerald-700 text-white rounded-lg p-4">
+                <div className="text-xs opacity-90">純額（USD）</div>
+                <div className="text-xl font-bold">{showAmounts ? `$${fmt(totals.netUSD, 'en-US', 2)}` : '***,***'}</div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* 明細テーブル */}
+      <div className="px-6 pb-8">
+        <div className="bg-white rounded-lg border overflow-hidden">
+          <table className="w-full">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">日付</th>
-                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">詳細</th>
-                <th className="px-3 py-2 text-center text-xs font-medium text-gray-500">通貨</th>
-                <th className="px-3 py-2 text-right text-xs font-medium text-gray-500">金額</th>
-                <th className="px-3 py-2 text-right text-xs font-medium text-gray-500">円換算額</th>
-                <th className="px-3 py-2 text-left text-xs font-medium text-gray-500">備考</th>
+                <th className="px-4 py-2 text-left text-xs text-gray-600">日付</th>
+                <th className="px-4 py-2 text-left text-xs text-gray-600">区分</th>
+                <th className="px-4 py-2 text-left text-xs text-gray-600">アカウント</th>
+                <th className="px-4 py-2 text-left text-xs text-gray-600">カテゴリ</th>
+                <th className="px-4 py-2 text-left text-xs text-gray-600">種別</th>
+                <th className="px-4 py-2 text-right text-xs text-gray-600">金額（元通貨）</th>
+                {(currencyView === 'jpy' || currencyView === 'both') && (
+                  <th className="px-4 py-2 text-right text-xs text-gray-600">円換算</th>
+                )}
+                {(currencyView === 'usd' || currencyView === 'both') && (
+                  <th className="px-4 py-2 text-right text-xs text-gray-600">$換算</th>
+                )}
+                <th className="px-4 py-2 text-left text-xs text-gray-600">メモ</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-200">
-              {details.map((item, index) => (
-                <tr key={index} className="hover:bg-gray-50">
-                  <td className="px-3 py-3 text-sm text-gray-900 whitespace-nowrap">{item.date}</td>
-                  <td className="px-3 py-3 text-sm text-gray-900">{item.detail}</td>
-                  <td className="px-3 py-3 text-sm text-center text-gray-900">{item.currency || 'JPY'}</td>
-                  <td className="px-3 py-3 text-sm text-right font-medium text-gray-700 whitespace-nowrap">
-                    {item.currency === 'JPY' || !item.currency
-                      ? `¥${(item.originalAmount ?? item.amountJPY).toLocaleString()}`
-                      : item.currency === 'USD'
-                      ? `${(item.originalAmount ?? item.amountUSD).toLocaleString()}`
-                      : item.currency === 'USDT'
-                      ? `${item.originalAmount?.toLocaleString()} USDT`
-                      : item.currency === 'AED'
-                      ? `${item.originalAmount?.toLocaleString()} AED`
-                      : `${item.originalAmount?.toLocaleString()} ${item.currency}`}
+            <tbody className="divide-y">
+              {filtered.map(r => (
+                <tr key={r.id} className="hover:bg-gray-50">
+                  <td className="px-4 py-2 text-sm">{r.date}</td>
+                  <td className="px-4 py-2 text-sm">
+                    {r.segment === 'corporate' ? '法人' : r.segment === 'personal' ? '個人' : '総合'}
                   </td>
-                  <td className="px-3 py-3 text-sm text-right font-medium text-gray-700 whitespace-nowrap">
-                    ¥{item.amountJPY.toLocaleString()}
+                  <td className="px-4 py-2 text-sm">{r.account}</td>
+                  <td className="px-4 py-2 text-sm">{r.category}</td>
+                  <td className="px-4 py-2 text-sm">
+                    <span className={`inline-flex items-center gap-1 ${r.type === 'IN' ? 'text-green-600' : r.type === 'OUT' ? 'text-red-600' : 'text-blue-600'}`}>
+                      {r.type === 'IN' ? <ArrowUpRight size={14} /> : r.type === 'OUT' ? <ArrowDownRight size={14} /> : <AlertCircle size={14} />}
+                      {r.type}
+                    </span>
                   </td>
-                  <td className="px-3 py-3 text-sm text-gray-600">{item.note || '-'}</td>
+                  <td className="px-4 py-2 text-sm text-right">
+                    {showAmounts ? `${r.currency} ${fmt(r.amount, r.currency === 'USD' ? 'en-US' : 'ja-JP', r.currency === 'USD' ? 2 : 0)}` : '***,***'}
+                  </td>
+                  {(currencyView === 'jpy' || currencyView === 'both') && (
+                    <td className="px-4 py-2 text-sm text-right">{showAmounts ? `¥${fmt(r.jpyAmount)}` : '***,***'}</td>
+                  )}
+                  {(currencyView === 'usd' || currencyView === 'both') && (
+                    <td className="px-4 py-2 text-sm text-right">{showAmounts ? `$${fmt(r.usdAmount ?? 0, 'en-US', 2)}` : '***,***'}</td>
+                  )}
+                  <td className="px-4 py-2 text-sm text-gray-600">{r.description ?? ''}</td>
                 </tr>
               ))}
+              {filtered.length === 0 && (
+                <tr>
+                  <td colSpan={9} className="px-6 py-10 text-center text-sm text-gray-500">
+                    対象データがありません。月・区分・検索条件を変更して再度お試しください。
+                  </td>
+                </tr>
+              )}
             </tbody>
+            <tfoot className="bg-gray-50">
+              <tr>
+                <td className="px-4 py-3 text-xs text-gray-600" colSpan={5}>小計</td>
+                <td className="px-4 py-3 text-xs text-right text-gray-800 font-medium">
+                  {showAmounts ? `IN/OUT = ¥${fmt(totals.inJPY)} / ¥${fmt(totals.outJPY)}` : '***,***'}
+                </td>
+                {(currencyView === 'jpy' || currencyView === 'both') && (
+                  <td className="px-4 py-3 text-xs text-right text-gray-800 font-medium">
+                    {showAmounts ? `Net ¥${fmt(totals.netJPY)}` : '***,***'}
+                  </td>
+                )}
+                {(currencyView === 'usd' || currencyView === 'both') && (
+                  <td className="px-4 py-3 text-xs text-right text-gray-800 font-medium">
+                    {showAmounts ? `Net $${fmt(totals.netUSD, 'en-US', 2)}` : '***,***'}
+                  </td>
+                )}
+                <td />
+              </tr>
+            </tfoot>
           </table>
         </div>
-      )}
+
+        {/* 注意事項 */}
+        <div className="mt-4 text-xs text-gray-500 flex items-start gap-2">
+          <AlertCircle size={14} className="mt-0.5" />
+          <div>
+            <p>※ 金額表示は画面の「円／$/両方」切替に連動します。PDF/Excel出力時も同様の表記を想定しています。</p>
+            <p>※ API未接続時は空で表示（エラーを出さない）します。接続後は `/api/reports?month=&segment=` を返す実装に置換してください。</p>
+          </div>
+        </div>
+      </div>
     </div>
   );
 };
 
-/* =========================
-   ページ本体
-   ========================= */
-const ReportAndCashflowPage: React.FC = () => {
-  const [selectedPeriod, setSelectedPeriod] = useState<string>('2025-06');
-  const [reportData, setReportData] = useState<{
-    summary: {
-      netProfit: number;
-      netProfitUSD: number;
-      cashBalance: number;
-      cashBalanceUSD: number;
-      totalRevenue: number;
-      totalRevenueUSD: number;
-      totalExpense: number;
-      totalExpenseUSD: number;
-      exchangeRate: number;
-    };
-  } | null>(null);
-  const [showApprovalSection, setShowApprovalSection] = useState<boolean>(false);
-  const [currency, setCurrency] = useState<'both' | 'JPY' | 'USD'>('both');
-  const [comment, setComment] = useState<string>('');
-  const [isApproved, setIsApproved] = useState<boolean>(false);
-  const [isExportMode, setIsExportMode] = useState<boolean>(false);
-
-  // カテゴリ定義
-  const incomeCategories = ['サイト収益', 'その他収益', '投資収益', '社債金利収益', 'その他投資収益'] as const;
-  const expenseCategories = ['法人支出', '個人支出', '立替分', '投資支出', 'その他支出'] as const;
-  const cashflowCategories = ['IN', 'OUT'] as const; // Flow リテラル
-
-  // ダミーデータ（ファイル管理・手入力から反映されたデータを想定）
-  const [cashflowDetails] = useState<{
-    income: Tx[];
-    expense: Tx[];
-    cashflow: Tx[];
-  }>({
-    // 収支のINセクション（フロー種別でINを選択されたもののみ）
-    income: [
-      { date: '2025-06-03', category: 'サイト収益', detail: 'プラットフォームA - 5月分', currency: 'JPY', originalAmount: 15000000, amountJPY: 15000000, amountUSD: 100671, note: 'サイト広告収益' },
-      { date: '2025-06-05', category: 'サイト収益', detail: 'プラットフォームB - 5月分', currency: 'JPY', originalAmount: 8500000, amountJPY: 8500000, amountUSD: 57047, note: 'サイトアフィリエイト' },
-      { date: '2025-06-12', category: 'サイト収益', detail: 'プラットフォームC - 5月分', currency: 'JPY', originalAmount: 5000000, amountJPY: 5000000, amountUSD: 33557, note: 'サイト会員収益' },
-      { date: '2025-06-10', category: '投資収益', detail: '米国株配当金', currency: 'USD', originalAmount: 16779, amountJPY: 2500000, amountUSD: 16779, note: 'AAPL配当' },
-      { date: '2025-06-20', category: '投資収益', detail: '投資信託分配金', currency: 'JPY', originalAmount: 2000000, amountJPY: 2000000, amountUSD: 13423, note: 'インデックスファンド' },
-      { date: '2025-06-15', category: '社債金利収益', detail: '社債利息', currency: 'JPY', originalAmount: 2000000, amountJPY: 2000000, amountUSD: 13423, note: '年率3％社債' },
-      { date: '2025-06-18', category: 'その他収益', detail: '為替差益', currency: 'USD', originalAmount: 58248, amountJPY: 8678900, amountUSD: 58248, note: 'USD/JPY為替差益' },
-      { date: '2025-06-25', category: 'その他収益', detail: '雑収入', currency: 'JPY', originalAmount: 2000000, amountJPY: 2000000, amountUSD: 13423, note: '返金・その他' },
-    ],
-    // 収支のOUTセクション（フロー種別でOUTを選択されたもののみ）
-    expense: [
-      { date: '2025-06-01', category: '法人支出', detail: '給与支払い', currency: 'JPY', originalAmount: 12000000, amountJPY: 12000000, amountUSD: 80537, note: '法人支出：月次給与' },
-      { date: '2025-06-01', category: '法人支出', detail: 'オフィス賃料', currency: 'JPY', originalAmount: 3500000, amountJPY: 3500000, amountUSD: 23490, note: '東京オフィス' },
-      { date: '2025-06-05', category: '法人支出', detail: '通信費・光熱費', currency: 'JPY', originalAmount: 800000, amountJPY: 800000, amountUSD: 5369, note: '月次固定費' },
-      { date: '2025-06-08', category: '個人支出', detail: '生活費', currency: 'JPY', originalAmount: 500000, amountJPY: 500000, amountUSD: 3356, note: '個人生活費' },
-      { date: '2025-06-15', category: '立替分', detail: '出張費用立替', currency: 'JPY', originalAmount: 300000, amountJPY: 300000, amountUSD: 2013, note: '大阪出張立替' },
-      { date: '2025-06-10', category: '投資支出', detail: 'サーバー設備購入', currency: 'USD', originalAmount: 53691, amountJPY: 8000000, amountUSD: 53691, note: 'AWS費用' },
-      { date: '2025-06-15', category: '投資支出', detail: 'システム開発費', currency: 'JPY', originalAmount: 4500000, amountJPY: 4500000, amountUSD: 30201, note: '新機能開発' },
-      { date: '2025-06-20', category: 'その他支出', detail: '銀行借入返済', currency: 'JPY', originalAmount: 1644400, amountJPY: 1644400, amountUSD: 11034, note: '運転資金返済' },
-    ],
-    // キャッシュフローセクション（ファイル管理・手入力ページで登録された全ての項目）
-    cashflow: [
-      // フロー種別: IN
-      { date: '2025-06-03', category: 'IN', detail: 'サイト収益: プラットフォームA - 5月分', currency: 'JPY', originalAmount: 15000000, amountJPY: 15000000, amountUSD: 100671, note: 'サイト広告収益' },
-      { date: '2025-06-05', category: 'IN', detail: 'サイト収益: プラットフォームB - 5月分', currency: 'JPY', originalAmount: 8500000, amountJPY: 8500000, amountUSD: 57047, note: 'サイトアフィリエイト' },
-      { date: '2025-06-12', category: 'IN', detail: 'サイト収益: プラットフォームC - 5月分', currency: 'JPY', originalAmount: 5000000, amountJPY: 5000000, amountUSD: 33557, note: 'サイト会員収益' },
-      { date: '2025-06-10', category: 'IN', detail: '投資収益: 米国株配当金', currency: 'USD', originalAmount: 16779, amountJPY: 2500000, amountUSD: 16779, note: 'AAPL配当' },
-      { date: '2025-06-20', category: 'IN', detail: '投資収益: 投資信託分配金', currency: 'JPY', originalAmount: 2000000, amountJPY: 2000000, amountUSD: 13423, note: 'インデックスファンド' },
-      { date: '2025-06-15', category: 'IN', detail: '社債金利収益: 社債利息', currency: 'JPY', originalAmount: 2000000, amountJPY: 2000000, amountUSD: 13423, note: '年率3％社債' },
-      { date: '2025-06-18', category: 'IN', detail: 'その他収益: 為替差益', currency: 'USD', originalAmount: 58248, amountJPY: 8678900, amountUSD: 58248, note: 'USD/JPY為替差益' },
-      { date: '2025-06-25', category: 'IN', detail: 'その他収益: 雑収入', currency: 'JPY', originalAmount: 2000000, amountJPY: 2000000, amountUSD: 13423, note: '返金・その他' },
-      // フロー種別: キャッシュフロー（IN）
-      { date: '2025-06-02', category: 'IN', detail: '売掛金回収', currency: 'JPY', originalAmount: 10000000, amountJPY: 10000000, amountUSD: 67114, note: '4月分売掛金' },
-      { date: '2025-06-07', category: 'IN', detail: '前受金受領', currency: 'JPY', originalAmount: 5000000, amountJPY: 5000000, amountUSD: 33557, note: '7月分前受' },
-      { date: '2025-06-08', category: 'IN', detail: '資金移動: 三菱UFJ銀行 → Binance Wallet', currency: 'JPY', originalAmount: 5000000, amountJPY: 5000000, amountUSD: 33557, note: 'BTC購入用' },
-      { date: '2025-06-22', category: 'IN', detail: '資金移動: 現金（大阪） → 三菱UFJ銀行', currency: 'JPY', originalAmount: 2000000, amountJPY: 2000000, amountUSD: 13423, note: '現金預入' },
-      { date: '2025-06-21', category: 'IN', detail: 'その他投資収益: 貸付金回収', currency: 'JPY', originalAmount: 2000000, amountJPY: 2000000, amountUSD: 13423, note: '短期貸付回収' },
-      // フロー種別: キャッシュフロー（OUT）
-      { date: '2025-06-11', category: 'OUT', detail: '仕入れ支払い', currency: 'JPY', originalAmount: 8000000, amountJPY: 8000000, amountUSD: 53691, note: '商品仕入' },
-      { date: '2025-06-16', category: 'OUT', detail: '外注費支払い', currency: 'JPY', originalAmount: 3000000, amountJPY: 3000000, amountUSD: 20134, note: '開発外注費' },
-      { date: '2025-06-15', category: 'OUT', detail: '資金移動: ADCB口座 → 台新銀行', currency: 'AED', originalAmount: 73825, amountJPY: 3000000, amountUSD: 20134, note: '運転資金移動' },
-      { date: '2025-06-28', category: 'OUT', detail: '資金移動: Ledger Wallet → Binance', currency: 'USDT', originalAmount: 10067, amountJPY: 1500000, amountUSD: 10067, note: 'USDT売却準備' },
-      { date: '2025-06-26', category: 'OUT', detail: 'その他支出: 預り金返還', currency: 'JPY', originalAmount: 1500000, amountJPY: 1500000, amountUSD: 10067, note: '一時預り金返還' },
-    ],
-  });
-
-  /* ========= 集計系ユーティリティ（型付き） ========= */
-  const getCategoryTotals = (transactions: Tx[], categories: readonly string[]): CategoryTotals => {
-    const totals: CategoryTotals = {};
-    categories.forEach((category) => {
-      const categoryTransactions = transactions.filter((t) => t.category === category);
-      totals[category] = {
-        amountJPY: categoryTransactions.reduce((sum, t) => sum + t.amountJPY, 0),
-        amountUSD: categoryTransactions.reduce((sum, t) => sum + t.amountUSD, 0),
-        details: categoryTransactions,
-      };
-    });
-    return totals;
-  };
-
-  const calculateTotals = () => {
-    const totalIncomeJPY = cashflowDetails.income.reduce((s, t) => s + t.amountJPY, 0);
-    const totalIncomeUSD = cashflowDetails.income.reduce((s, t) => s + t.amountUSD, 0);
-    const totalExpenseJPY = cashflowDetails.expense.reduce((s, t) => s + t.amountJPY, 0);
-    const totalExpenseUSD = cashflowDetails.expense.reduce((s, t) => s + t.amountUSD, 0);
-    const netProfitJPY = totalIncomeJPY - totalExpenseJPY;
-    const netProfitUSD = totalIncomeUSD - totalExpenseUSD;
-
-    return {
-      totalIncomeJPY,
-      totalIncomeUSD,
-      totalExpenseJPY,
-      totalExpenseUSD,
-      netProfitJPY,
-      netProfitUSD,
-    };
-  };
-
-  const totals = calculateTotals();
-  const incomeCategoryTotals = getCategoryTotals(cashflowDetails.income, incomeCategories);
-  const expenseCategoryTotals = getCategoryTotals(cashflowDetails.expense, expenseCategories);
-  const cashflowCategoryTotals = getCategoryTotals(cashflowDetails.cashflow, cashflowCategories);
-
-  /* ========= ダミーのサマリ作成 ========= */
-  const generateReportData = () => {
-    const data = {
-      summary: {
-        netProfit: totals.netProfitJPY,
-        netProfitUSD: totals.netProfitUSD,
-        cashBalance: 450325890,
-        cashBalanceUSD: 3076925,
-        totalRevenue: totals.totalIncomeJPY,
-        totalRevenueUSD: totals.totalIncomeUSD,
-        totalExpense: totals.totalExpenseJPY,
-        totalExpenseUSD: totals.totalExpenseUSD,
-        exchangeRate: 149,
-      },
-    };
-    setReportData(data);
-  };
-
-  useEffect(() => {
-    generateReportData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPeriod]);
-
-  const formatCurrency = (value: number, type: 'JPY' | 'USD' = 'JPY') => {
-    return type === 'JPY' ? `¥${value.toLocaleString()}` : `$${value.toLocaleString()}`;
-  };
-
-  const handlePDFExport = async () => {
-    setIsExportMode(true);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    alert('すべてのカテゴリを展開した状態でPDFファイルをダウンロードします');
-    setIsExportMode(false);
-  };
-
-  const handleExcelExport = async () => {
-    setIsExportMode(true);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    alert('すべてのカテゴリを展開した状態でExcelファイルをダウンロードします');
-    setIsExportMode(false);
-  };
-
-  /* ========= 画面 ========= */
-  return (
-    <div className="min-h-screen bg-gray-50">
-      {/* ヘッダー */}
-      <header className="bg-gray-100" style={{ borderBottom: '1px solid #ccc' }}>
-        <div className="flex items-center justify-between" style={{ height: '50px' }}>
-          <div style={{ paddingLeft: '20px' }}>
-            <h1 className="text-gray-900" style={{ fontSize: '16px', fontWeight: 'bold' }}>
-              資産管理システム
-            </h1>
-          </div>
-
-          <nav className="flex items-center" style={{ paddingRight: '20px' }}>
-            <a
-              href="/"
-              style={{
-                padding: '15px 18px',
-                fontSize: '14px',
-                fontWeight: '400',
-                textDecoration: 'none',
-                display: 'inline-block',
-                position: 'relative',
-                color: '#333',
-              }}
-              className="hover:bg-gray-200"
-            >
-              ダッシュボード
-            </a>
-            <a
-              href="/assets"
-              className="hover:bg-gray-200"
-              style={{
-                padding: '15px 18px',
-                fontSize: '14px',
-                fontWeight: '400',
-                textDecoration: 'none',
-                display: 'inline-block',
-                position: 'relative',
-                color: '#333',
-              }}
-            >
-              資産管理
-            </a>
-            <a
-              href="/files"
-              className="hover:bg-gray-200"
-              style={{
-                padding: '15px 18px',
-                fontSize: '14px',
-                fontWeight: '400',
-                textDecoration: 'none',
-                display: 'inline-block',
-                position: 'relative',
-                color: '#333',
-              }}
-            >
-              ファイル管理
-            </a>
-            <a
-              href="/manual-entry"
-              className="hover:bg-gray-200"
-              style={{
-                padding: '15px 18px',
-                fontSize: '14px',
-                fontWeight: '400',
-                textDecoration: 'none',
-                display: 'inline-block',
-                position: 'relative',
-                color: '#333',
-              }}
-            >
-              手入力
-            </a>
-            <a
-              href="/reports"
-              style={{
-                padding: '15px 18px',
-                fontSize: '14px',
-                fontWeight: '600',
-                textDecoration: 'none',
-                display: 'inline-block',
-                position: 'relative',
-                color: 'white',
-                backgroundColor: '#4a90e2',
-                borderTopLeftRadius: '4px',
-                borderTopRightRadius: '4px',
-              }}
-            >
-              レポート出力
-            </a>
-            <a
-              href="/admin"
-              className="hover:bg-gray-200"
-              style={{
-                padding: '15px 18px',
-                fontSize: '14px',
-                fontWeight: '400',
-                textDecoration: 'none',
-                display: 'inline-block',
-                position: 'relative',
-                color: '#333',
-              }}
-            >
-              管理者設定
-            </a>
-          </nav>
-        </div>
-      </header>
-
-      {/* メインコンテンツ */}
-      <main className="px-4 sm:px-6 lg:px-8 py-6">
-        {/* ページタイトルとコントロール */}
-        <div className="mb-6">
-          <div className="flex justify-between items-center mb-4">
-            <div>
-              <h2 className="text-2xl font-bold text-gray-900">レポート</h2>
-              <p className="mt-1 text-sm text-gray-600">月次収支状況と詳細分析</p>
-            </div>
-            <div className="flex items-center space-x-4">
-              <div className="flex items-center space-x-2">
-                <Calendar className="w-4 h-4 text-gray-500" />
-                <input
-                  type="month"
-                  value={selectedPeriod}
-                  onChange={(e) => setSelectedPeriod(e.target.value)}
-                  className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-              <select
-                value={currency}
-                onChange={(e) => setCurrency(e.target.value as 'both' | 'JPY' | 'USD')}
-                className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="both">円/ドル両方</option>
-                <option value="JPY">円のみ</option>
-                <option value="USD">ドルのみ</option>
-              </select>
-              <button
-                onClick={handlePDFExport}
-                className="px-4 py-2 bg-red-600 text-white font-medium rounded-md hover:bg-red-700 transition-colors flex items-center"
-              >
-                <FileText className="w-4 h-4 mr-2" />
-                PDF出力
-              </button>
-              <button
-                onClick={handleExcelExport}
-                className="px-4 py-2 bg-green-600 text-white font-medium rounded-md hover:bg-green-700 transition-colors flex items-center"
-              >
-                <Download className="w-4 h-4 mr-2" />
-                Excel出力
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {reportData && (
-          <>
-            {/* 収支サマリー */}
-            <div className="grid grid-cols-4 gap-4 mb-8">
-              <div className="bg-gradient-to-r from-blue-50 to-blue-100 p-6 rounded-lg shadow-sm border border-blue-200">
-                <div className="flex items-center justify-between mb-2">
-                  <p className="text-sm font-medium text-blue-700">今月の純利益</p>
-                  <TrendingUp className="w-5 h-5 text-blue-600" />
-                </div>
-                <p className="text-2xl font-bold text-blue-900">{formatCurrency(totals.netProfitJPY)}</p>
-                <p className="text-sm text-blue-700 mt-1">{formatCurrency(totals.netProfitUSD, 'USD')}</p>
-              </div>
-
-              <div className="bg-gradient-to-r from-purple-50 to-purple-100 p-6 rounded-lg shadow-sm border border-purple-200">
-                <div className="flex items-center justify-between mb-2">
-                  <p className="text-sm font-medium text-purple-700">月末キャッシュ残高</p>
-                  <DollarSign className="w-5 h-5 text-purple-600" />
-                </div>
-                <p className="text-2xl font-bold text-purple-900">
-                  {formatCurrency(reportData.summary.cashBalance)}
-                </p>
-                <p className="text-sm text-purple-700 mt-1">{formatCurrency(reportData.summary.cashBalanceUSD, 'USD')}</p>
-              </div>
-
-              <div className="bg-gradient-to-r from-green-50 to-green-100 p-6 rounded-lg shadow-sm border border-green-200">
-                <div className="flex items-center justify-between mb-2">
-                  <p className="text-sm font-medium text-green-700">IN合計</p>
-                  <TrendingUp className="w-5 h-5 text-green-600" />
-                </div>
-                <p className="text-2xl font-bold text-green-900">{formatCurrency(totals.totalIncomeJPY)}</p>
-                <p className="text-sm text-green-700 mt-1">{formatCurrency(totals.totalIncomeUSD, 'USD')}</p>
-              </div>
-
-              <div className="bg-gradient-to-r from-red-50 to-red-100 p-6 rounded-lg shadow-sm border border-red-200">
-                <div className="flex items-center justify-between mb-2">
-                  <p className="text-sm font-medium text-red-700">OUT合計</p>
-                  <TrendingDown className="w-5 h-5 text-red-600" />
-                </div>
-                <p className="text-2xl font-bold text-red-900">{formatCurrency(totals.totalExpenseJPY)}</p>
-                <p className="text-sm text-red-700 mt-1">{formatCurrency(totals.totalExpenseUSD, 'USD')}</p>
-              </div>
-            </div>
-
-            {/* IN/OUT カテゴリ別表示 */}
-            <div className="bg-white rounded-lg shadow-sm border p-6 mb-8">
-              <h3 className="text-lg font-semibold mb-4 flex items-center">
-                <DollarSign className="w-5 h-5 mr-2 text-gray-600" />
-                収支サマリー
-              </h3>
-
-              <div className="grid grid-cols-2 gap-6">
-                {/* IN（収入）セクション */}
-                <div className="bg-white rounded-lg shadow-sm border p-6">
-                  <h3 className="text-lg font-semibold mb-4 flex items-center">
-                    <TrendingUp className="w-5 h-5 mr-2 text-green-600" />
-                    IN（収入）
-                  </h3>
-                  {incomeCategories.map((category) => (
-                    <CategorySummaryItem
-                      key={category}
-                      category={category}
-                      amountJPY={incomeCategoryTotals[category].amountJPY}
-                      amountUSD={incomeCategoryTotals[category].amountUSD}
-                      details={incomeCategoryTotals[category].details}
-                      type="income"
-                      isExportMode={isExportMode}
-                    />
-                  ))}
-                  <div className="mt-4 pt-4 border-t-2 border-green-200">
-                    <div className="flex justify-between items-center">
-                      <span className="text-lg font-bold text-green-700">IN合計</span>
-                      <div className="text-right">
-                        <span className="text-lg font-bold text-green-700">
-                          ¥{totals.totalIncomeJPY.toLocaleString()}
-                        </span>
-                        <span className="text-sm text-green-700 ml-2">
-                          ${totals.totalIncomeUSD.toLocaleString()}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* OUT（支出）セクション */}
-                <div className="bg-white rounded-lg shadow-sm border p-6">
-                  <h3 className="text-lg font-semibold mb-4 flex items-center">
-                    <TrendingDown className="w-5 h-5 mr-2 text-red-600" />
-                    OUT（支出）
-                  </h3>
-                  {expenseCategories.map((category) => (
-                    <CategorySummaryItem
-                      key={category}
-                      category={category}
-                      amountJPY={expenseCategoryTotals[category].amountJPY}
-                      amountUSD={expenseCategoryTotals[category].amountUSD}
-                      details={expenseCategoryTotals[category].details}
-                      type="expense"
-                      isExportMode={isExportMode}
-                    />
-                  ))}
-                  <div className="mt-4 pt-4 border-t-2 border-red-200">
-                    <div className="flex justify-between items-center">
-                      <span className="text-lg font-bold text-red-700">OUT合計</span>
-                      <div className="text-right">
-                        <span className="text-lg font-bold text-red-700">
-                          ¥{totals.totalExpenseJPY.toLocaleString()}
-                        </span>
-                        <span className="text-sm text-red-700 ml-2">
-                          ${totals.totalExpenseUSD.toLocaleString()}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* キャッシュフローセクション */}
-            <div className="bg-white rounded-lg shadow-sm border p-6 mb-8">
-              <h3 className="text-lg font-semibold mb-4 flex items-center">
-                <BarChart3 className="w-5 h-5 mr-2 text-blue-600" />
-                キャッシュフロー
-              </h3>
-
-              {/* INとOUTを横並びに配置 */}
-              <div className="grid grid-cols-2 gap-6 mb-4">
-                {/* IN */}
-                <div>
-                  <CategorySummaryItem
-                    category="IN"
-                    amountJPY={cashflowCategoryTotals['IN'].amountJPY}
-                    amountUSD={cashflowCategoryTotals['IN'].amountUSD}
-                    details={cashflowCategoryTotals['IN'].details}
-                    type="cashflow"
-                    isExportMode={isExportMode}
-                  />
-                </div>
-
-                {/* OUT */}
-                <div>
-                  <CategorySummaryItem
-                    category="OUT"
-                    amountJPY={cashflowCategoryTotals['OUT'].amountJPY}
-                    amountUSD={cashflowCategoryTotals['OUT'].amountUSD}
-                    details={cashflowCategoryTotals['OUT'].details}
-                    type="cashflow"
-                    isExportMode={isExportMode}
-                  />
-                </div>
-              </div>
-
-              <div
-                className={`mt-4 pt-4 border-t-2 ${
-                  cashflowCategoryTotals['IN'].amountJPY - cashflowCategoryTotals['OUT'].amountJPY >= 0
-                    ? 'border-blue-200'
-                    : 'border-red-200'
-                }`}
-              >
-                <div className="flex justify-between items-center">
-                  <span
-                    className={`text-lg font-bold ${
-                      cashflowCategoryTotals['IN'].amountJPY - cashflowCategoryTotals['OUT'].amountJPY >= 0
-                        ? 'text-blue-700'
-                        : 'text-red-700'
-                    }`}
-                  >
-                    キャッシュフロー合計（IN - OUT）
-                  </span>
-                  <div className="text-right">
-                    <span
-                      className={`text-lg font-bold ${
-                        cashflowCategoryTotals['IN'].amountJPY - cashflowCategoryTotals['OUT'].amountJPY >= 0
-                          ? 'text-blue-700'
-                          : 'text-red-700'
-                      }`}
-                    >
-                      ¥{(cashflowCategoryTotals['IN'].amountJPY - cashflowCategoryTotals['OUT'].amountJPY).toLocaleString()}
-                    </span>
-                    <span
-                      className={`text-sm ${
-                        cashflowCategoryTotals['IN'].amountUSD - cashflowCategoryTotals['OUT'].amountUSD >= 0
-                          ? 'text-blue-700'
-                          : 'text-red-700'
-                      } ml-2`}
-                    >
-                      ${(cashflowCategoryTotals['IN'].amountUSD - cashflowCategoryTotals['OUT'].amountUSD).toLocaleString()}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* コメント・承認セクション */}
-            <div className="bg-white rounded-lg shadow-sm border p-6 mb-8">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-semibold">コメント・備考</h3>
-                <button
-                  onClick={() => setShowApprovalSection(!showApprovalSection)}
-                  className="text-sm text-blue-600 hover:text-blue-800"
-                >
-                  {showApprovalSection ? '承認欄を非表示' : '承認欄を表示'}
-                </button>
-              </div>
-
-              <textarea
-                value={comment}
-                onChange={(e) => setComment(e.target.value)}
-                placeholder="決算メモ、注記事項などをご記入ください..."
-                className="w-full h-32 px-4 py-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
-              />
-
-              {showApprovalSection && (
-                <div className="mt-4 pt-4 border-t">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center">
-                      <input
-                        type="checkbox"
-                        id="approval"
-                        checked={isApproved}
-                        onChange={(e) => setIsApproved(e.target.checked)}
-                        className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-                      />
-                      <label htmlFor="approval" className="ml-2 text-sm text-gray-700">
-                        このレポートを承認する
-                      </label>
-                    </div>
-                    {isApproved && (
-                      <div className="flex items-center text-green-600">
-                        <Check className="w-4 h-4 mr-1" />
-                        <span className="text-sm font-medium">承認済み</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* 為替レート情報 */}
-            <div className="bg-gray-50 rounded-lg p-4 text-sm text-gray-600">
-              <div className="flex items-center">
-                <AlertCircle className="w-4 h-4 mr-2" />
-                <span>為替レート: 1 USD = {reportData.summary.exchangeRate} JPY（{selectedPeriod}月平均レート）</span>
-              </div>
-              <div className="mt-1">
-                <span>データ取得元: 三菱UFJ銀行 / 最終更新: {new Date().toLocaleDateString('ja-JP')}</span>
-              </div>
-            </div>
-          </>
-        )}
-      </main>
-    </div>
-  );
-};
-
-export default ReportAndCashflowPage;
+export default Reports;
